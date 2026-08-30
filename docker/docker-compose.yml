@@ -1,0 +1,170 @@
+version: '3.8'
+
+services:
+  # ==================== PostgreSQL Database ====================
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_security_gateway_postgres
+    
+    # Environment variables
+    environment:
+      POSTGRES_USER: securitygateway
+      POSTGRES_PASSWORD: secure_password_123
+      POSTGRES_DB: ai_security_gateway
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    
+    # Data persistence
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql  # Optional: init script
+    
+    # Port mapping
+    ports:
+      - "5432:5432"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U securitygateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    networks:
+      - ai_security_network
+
+  # ==================== Redis Cache ====================
+  redis:
+    image: redis:7-alpine
+    container_name: ai_security_gateway_redis
+    
+    # Data persistence
+    volumes:
+      - redis_data:/data
+    
+    # Port mapping
+    ports:
+      - "6379:6379"
+    
+    # Command with password (optional)
+    command: redis-server --appendonly yes
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    networks:
+      - ai_security_network
+
+  # ==================== RabbitMQ Message Broker ====================
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: ai_security_gateway_rabbitmq
+    
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_VHOST: /
+    
+    # Data persistence
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    
+    # Port mapping
+    ports:
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    networks:
+      - ai_security_network
+
+  # ==================== FastAPI Application ====================
+  api:
+    build:
+      context: ..                    # Build from parent directory
+      dockerfile: docker/Dockerfile  # Use Dockerfile from docker folder
+    
+    container_name: ai_security_gateway_api
+    
+    # Environment variables
+    environment:
+      DATABASE_URL: postgresql://securitygateway:secure_password_123@postgres:5432/ai_security_gateway
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      DEBUG: "False"
+      API_TITLE: "AI API Security Gateway"
+      API_VERSION: "1.0.0"
+      LOG_LEVEL: "INFO"
+      ENABLE_RATE_LIMITING: "True"
+      RATE_LIMIT_REQUESTS: 100
+      RATE_LIMIT_PERIOD: 60
+    
+    # Port mapping
+    ports:
+      - "8000:8000"
+    
+    # Volume mounts
+    volumes:
+      - ../app:/app/app                # Code (live reload)
+      - ../logs:/app/logs              # Logs
+      - ../ml_models:/app/ml_models    # ML models
+      - ../datasets:/app/datasets      # Datasets
+    
+    # Depends on
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    
+    # Run command
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    
+    networks:
+      - ai_security_network
+
+  # ==================== Nginx Reverse Proxy (Optional) ====================
+  nginx:
+    image: nginx:alpine
+    container_name: ai_security_gateway_nginx
+    
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    depends_on:
+      - api
+    
+    networks:
+      - ai_security_network
+
+# ==================== Volumes ====================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+
+# ==================== Networks ====================
+networks:
+  ai_security_network:
+    driver: bridge
